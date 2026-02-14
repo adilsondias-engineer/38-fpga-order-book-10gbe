@@ -1,11 +1,10 @@
 # Project 38: Order Book 10GbE - FPGA Order Book with UDP TX and Latency Measurement
 
 This project is part of a complete end-to-end trading system:
-
-    Main Repository: fpga-trading-systems
-    Project Number: 38 of 38(for now, more to come)
-    Category: FPGA Core
-    Dependencies: 
+- **Main Repository:** [fpga-trading-systems](https://github.com/adilsondias-engineer/fpga-trading-systems)
+- **Project Number:** 38 of 38(for now, more to come)
+- **Category:** FPGA Core 
+- **Dependencies:**         
        Project 33 - Custom 10GBASE-R PHY (VHDL)
        Project 34 - ITCH Parser
 
