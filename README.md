@@ -1,5 +1,16 @@
 # Project 38: Order Book 10GbE - FPGA Order Book with UDP TX and Latency Measurement
 
+This project is part of a complete end-to-end trading system:
+
+    Main Repository: fpga-trading-systems
+    Project Number: 38 of 38(for now, more to come)
+    Category: FPGA Core
+    Dependencies: 
+       Project 33 - Custom 10GBASE-R PHY (VHDL)
+       Project 34 - ITCH Parser
+
+---
+
 **Platform:** Xilinx Kintex-7 XC7K325T (AX7325B)
 **Technology:** VHDL, 10GBASE-R PHY, XGMII, MoldUDP64/SoupBinTCP ITCH
 **Status:** Hardware Tested - WNS +0.640ns, 0 critical warnings, all memories in BRAM
