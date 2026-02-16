@@ -2,7 +2,7 @@
 
 This project is part of a complete end-to-end trading system:
 - **Main Repository:** [fpga-trading-systems](https://github.com/adilsondias-engineer/fpga-trading-systems)
-- **Project Number:** 38 of 38(for now, more to come)
+- **Project Number:** 38 of 38
 - **Category:** FPGA Core 
 - **Dependencies:**         
        Project 33 - Custom 10GBASE-R PHY (VHDL)
@@ -12,7 +12,7 @@ This project is part of a complete end-to-end trading system:
 
 **Platform:** Xilinx Kintex-7 XC7K325T (AX7325B)
 **Technology:** VHDL, 10GBASE-R PHY, XGMII, MoldUDP64/SoupBinTCP ITCH
-**Status:** Hardware Tested - WNS +0.640ns, 0 critical warnings, all memories in BRAM
+**Status:** Hardware Tested - WNS +0.640ns, 0 critical warnings, all memories in BRAM, BBO output verified clean (no empty/duplicate packets)
 
 ---
 
@@ -125,6 +125,7 @@ Based on Project 23's latency calculator:
 |   |   +-- bbo_udp_tx.vhd            # BBO UDP TX over XGMII
 |   +-- debug/
 |       +-- gtx_debug_reporter.v      # UART debug output
+|       +-- itch_debug_uart.vhd       # ITCH message debug output (UART)
 |       +-- uart_tx_simple.v          # UART TX primitive
 +-- vivado/
     +-- reports/                       # Synthesis/implementation reports
@@ -246,6 +247,36 @@ Both FIFOs use `async_fifo_itch.vhd` (XPM wrapper with `FIFO_MEMORY_TYPE => "blo
 - **Fix:** Added pre-registered `selected_bbo_current` and `selected_bbo_prev` signals. Stage 1 (counter=999): capture array elements into flat signals via one-hot decode. Stage 2 (next cycle): compare flat signals with no array indexing
 - **Impact:** WNS improved from +0.352ns to +0.457ns. Critical path reduced to pure routing (0 logic levels, 91% net delay)
 
+### Bug 13: Arbiter BBO Capture at Wrong Cycle
+- **Symptom:** 728 BBO packets all showing empty book (bid=0x00000000, ask=0xFFFFFFFF)
+- **Root cause:** At counter=999, VHDL for-loop reads OLD `symbol_select` (signal semantics: reads value from before current clock edge). Captures outgoing symbol's BBO instead of incoming.
+- **Fix:** Moved BBO capture from counter=999 to counter=1, where `symbol_select` is stable for the new symbol
+
+### Bug 14: Pending Check Using Integer Index
+- **Symptom:** High fanout path from `current_symbol` integer through MUX decode
+- **Root cause:** `bbo_update_pending(current_symbol)` uses integer index = multiplexer
+- **Fix:** Changed to `(bbo_update_pending and symbol_select) /= (symbol_select'range => '0')` for AND-OR tree
+
+### Bug 15: Symbol Filter Bypass Removed
+- **Context:** `ENABLE_SYMBOL_FILTER` constant allowed disabling symbol routing, but this corrupts the book with mixed-symbol orders
+- **Fix:** Removed bypass path entirely -- symbol routing is mandatory for multi-symbol operation
+
+### Bug 16: Non-Atomic BBO Output (bbo_tracker.vhd)
+- **Symptom:** Spread always 0 for non-crossed markets; cross-symbol contamination
+- **Root cause:** Continuous assignments (`bbo.bid_price <= best_bid_price_reg`) allowed arbiter to capture inconsistent snapshot mid-scan
+- **Fix:** BBO output now only updates atomically in DONE state. Reset initializes output registers.
+
+### Bug 17: symbol_select Double-Assignment
+- **Symptom:** Cross-symbol BBO contamination
+- **Root cause:** Two overlapping signal assignments (full vector shift + single-element override) could mis-synthesize
+- **Fix:** Removed redundant second assignment. Single shift is correct for one-hot propagation.
+
+### Bug 18: Arbiter Missing Field-Level Change Detection
+- **Symptom:** 37/38 BBO packets show empty book from 5000 NVDA messages
+- **Root cause:** P38 arbiter blindly output on every `bbo_update_pending` pulse without comparing fields against last emitted BBO (P23 divergence). Also `prev_bbo` ask_price init was `(others => '0')` instead of `(others => '1')`.
+- **Fix:** Added P23-style 6-field comparison + `last_bbo` register (only updates on actual emission) + `last_symbol_idx` (prevents cross-symbol false suppression) + `valid = '1'` gate (suppresses empty BBOs)
+- **Result:** Clean output -- 7 unique BBO updates from 5000 ITCH messages, zero empty packets, zero duplicates
+
 ---
 
 ## Hardware Requirements
@@ -342,6 +373,6 @@ generic (
 ---
 
 **Created:** January 2026
-**Last Updated:** February 13, 2026
+**Last Updated:** February 16, 2026
 **Target Latency:** < 500 ns FPGA processing
-**Hardware Status:** Tested on AX7325B, WNS +0.640ns, 0 critical warnings
+**Hardware Status:** Tested on AX7325B, WNS +0.640ns, 0 critical warnings, BBO output verified clean

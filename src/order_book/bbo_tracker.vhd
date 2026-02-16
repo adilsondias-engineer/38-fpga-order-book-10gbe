@@ -7,8 +7,17 @@
 --   - Best Ask (lowest sell price)
 --   - Spread (ask - bid)
 --
--- Strategy: Scan top N price levels to find best bid/ask
--- Latency: BBO_SCAN_DEPTH cycles to compute BBO
+-- Strategy: Scan all price levels to find best bid/ask
+-- Latency: BBO_SCAN_DEPTH * 7 cycles per side (6-cycle BRAM read latency + 1)
+--
+-- Read latency: 6 cycles from level_req to level_valid:
+--   Cycle 0: level_req='1' issued by bbo_tracker
+--   Cycle 1: order_book_manager sees level_req, issues price_cmd_valid
+--   Cycle 2: price_level_table captures command (pipe_cmd_valid='1')
+--   Cycle 3: BRAM read completes (bram_do valid), pipe_cmd_valid_d1='1'
+--   Cycle 4: pipe_lookup_d1='1', rd_data_stage1 captures bram_do
+--   Cycle 5: rd_data_stage2 captures stage1, rd_valid_stage2='1'
+--   Cycle 6: level_valid='1', level_data valid — check here
 --------------------------------------------------------------------------------
 
 library IEEE;
@@ -41,14 +50,12 @@ end bbo_tracker;
 
 architecture Behavioral of bbo_tracker is
 
-    -- FSM states
-    -- Note: 3 wait cycles needed due to price_level_table pipeline:
-    --   Cycle 0: level_req=1, cmd issued
-    --   Cycle 1: bram_addr set, bram_do has OLD data
-    --   Cycle 2: bram_do has CORRECT data, captured to stage1
-    --   Cycle 3: rd_valid=1, level_valid=1, data available
-    type state_t is (IDLE, SCAN_BIDS, SCAN_BIDS_WAIT1, SCAN_BIDS_WAIT2, SCAN_BIDS_WAIT3,
+    -- FSM states (6 wait cycles to match price_level_table round-trip latency)
+    type state_t is (IDLE,
+                     SCAN_BIDS, SCAN_BIDS_WAIT1, SCAN_BIDS_WAIT2, SCAN_BIDS_WAIT3,
+                                SCAN_BIDS_WAIT4, SCAN_BIDS_WAIT5, SCAN_BIDS_WAIT6,
                      SCAN_ASKS, SCAN_ASKS_WAIT1, SCAN_ASKS_WAIT2, SCAN_ASKS_WAIT3,
+                                SCAN_ASKS_WAIT4, SCAN_ASKS_WAIT5, SCAN_ASKS_WAIT6,
                      COMPUTE_SPREAD, DONE);
     signal state : state_t := IDLE;
 
@@ -77,7 +84,7 @@ architecture Behavioral of bbo_tracker is
     -- Ask scanning (scan from lowest to highest)
     signal best_ask_found       : std_logic := '0';
 
-    -- Pipeline: register comparison result in WAIT3, apply in SCAN
+    -- Pipeline: register comparison result in WAIT6, apply in SCAN
     -- Eliminates 32-bit magnitude compare from CE critical path
     signal bid_should_update    : std_logic := '0';
     signal ask_should_update    : std_logic := '0';
@@ -99,18 +106,14 @@ architecture Behavioral of bbo_tracker is
     attribute MAX_FANOUT of best_ask_price_reg : signal is 16;
     attribute MAX_FANOUT of best_ask_shares_reg : signal is 16;
     attribute MAX_FANOUT of bbo_valid_reg : signal is 16;
-    --attribute MAX_FANOUT of best_spread_reg : signal is 16;
-    
-    
+
 begin
 
-    -- Output BBO (all fields assigned from registers)
-    bbo.bid_price   <= best_bid_price_reg;
-    bbo.bid_shares  <= best_bid_shares_reg;
-    bbo.ask_price   <= best_ask_price_reg;
-    bbo.ask_shares  <= best_ask_shares_reg;
-    bbo.valid       <= bbo_valid_reg;
-    bbo.spread      <= best_spread_reg;
+    -- Output BBO: registered in DONE state for atomic update.
+    -- Continuous assignments here caused mid-scan capture of inconsistent
+    -- {new_bid, old_ask, old_spread} by the arbiter at counter=1.
+    -- Now bbo output only updates when a scan completes (DONE state),
+    -- guaranteeing all fields are from the same scan cycle.
 
     ------------------------------------------------------------------------
     -- BBO Tracking FSM
@@ -137,6 +140,13 @@ begin
                 captured_price <= (others => '0');
                 captured_shares <= (others => '0');
                 first_scan <= '1';
+                -- Reset BBO output registers
+                bbo.bid_price <= (others => '0');
+                bbo.bid_shares <= (others => '0');
+                bbo.ask_price <= (others => '1');
+                bbo.ask_shares <= (others => '0');
+                bbo.valid <= '0';
+                bbo.spread <= (others => '0');
             else
                 -- Default outputs
                 bbo_update <= '0';
@@ -163,7 +173,7 @@ begin
                         end if;
 
                     when SCAN_BIDS =>
-                        -- Apply registered comparison from previous WAIT3
+                        -- Apply registered comparison from previous WAIT6
                         -- (1-bit CE path instead of 32-bit compare)
                         if bid_should_update = '1' then
                             best_bid_price_reg <= captured_price;
@@ -186,20 +196,25 @@ begin
                         end if;
 
                     when SCAN_BIDS_WAIT1 =>
-                        -- Wait cycle 1 (3-cycle read latency: bram_addr set)
                         level_req <= '0';
                         state <= SCAN_BIDS_WAIT2;
 
                     when SCAN_BIDS_WAIT2 =>
-                        -- Wait cycle 2 (bram_do now has correct data, being captured)
-                        level_req <= '0';
                         state <= SCAN_BIDS_WAIT3;
 
                     when SCAN_BIDS_WAIT3 =>
-                        -- Wait cycle 3 - data valid now (rd_valid_stage2=1)
+                        state <= SCAN_BIDS_WAIT4;
+
+                    when SCAN_BIDS_WAIT4 =>
+                        state <= SCAN_BIDS_WAIT5;
+
+                    when SCAN_BIDS_WAIT5 =>
+                        state <= SCAN_BIDS_WAIT6;
+
+                    when SCAN_BIDS_WAIT6 =>
+                        -- Wait cycle 6 — level_valid='1' now (6-cycle round-trip latency)
                         -- Register comparison result: 32-bit compare happens here
                         -- but result is applied in SCAN_BIDS (1-bit CE path)
-                        level_req <= '0';
 
                         if level_valid = '1' and level_data.valid = '1' and level_data.side = '0' then
                             if best_bid_found = '0' or unsigned(level_data.price) > unsigned(best_bid_price_reg) then
@@ -221,7 +236,7 @@ begin
                         state <= SCAN_BIDS;
 
                     when SCAN_ASKS =>
-                        -- Apply registered comparison from previous WAIT3
+                        -- Apply registered comparison from previous WAIT6
                         -- (1-bit CE path instead of 32-bit compare)
                         if ask_should_update = '1' then
                             best_ask_price_reg <= captured_price;
@@ -241,20 +256,25 @@ begin
                         end if;
 
                     when SCAN_ASKS_WAIT1 =>
-                        -- Wait cycle 1 (3-cycle read latency: bram_addr set)
                         level_req <= '0';
                         state <= SCAN_ASKS_WAIT2;
 
                     when SCAN_ASKS_WAIT2 =>
-                        -- Wait cycle 2 (bram_do now has correct data, being captured)
-                        level_req <= '0';
                         state <= SCAN_ASKS_WAIT3;
 
                     when SCAN_ASKS_WAIT3 =>
-                        -- Wait cycle 3 - data valid now (rd_valid_stage2=1)
+                        state <= SCAN_ASKS_WAIT4;
+
+                    when SCAN_ASKS_WAIT4 =>
+                        state <= SCAN_ASKS_WAIT5;
+
+                    when SCAN_ASKS_WAIT5 =>
+                        state <= SCAN_ASKS_WAIT6;
+
+                    when SCAN_ASKS_WAIT6 =>
+                        -- Wait cycle 6 — level_valid='1' now (6-cycle round-trip latency)
                         -- Register comparison result: 32-bit compare happens here
                         -- but result is applied in SCAN_ASKS (1-bit CE path)
-                        level_req <= '0';
 
                         if level_valid = '1' and level_data.valid = '1' and level_data.side = '1' then
                             if best_ask_found = '0' or unsigned(level_data.price) < unsigned(best_ask_price_reg) then
@@ -301,6 +321,15 @@ begin
                         state <= DONE;
 
                     when DONE =>
+                        -- Atomic BBO output update: all fields from same completed scan.
+                        -- Updated unconditionally so arbiter always sees latest snapshot.
+                        bbo.bid_price  <= best_bid_price_reg;
+                        bbo.bid_shares <= best_bid_shares_reg;
+                        bbo.ask_price  <= best_ask_price_reg;
+                        bbo.ask_shares <= best_ask_shares_reg;
+                        bbo.valid      <= bbo_valid_reg;
+                        bbo.spread     <= best_spread_reg;
+
                         -- Pulse bbo_update if BBO changed (price, shares, or valid status)
                         -- OR if this is the first scan (to initialize output)
                         if first_scan = '1' or

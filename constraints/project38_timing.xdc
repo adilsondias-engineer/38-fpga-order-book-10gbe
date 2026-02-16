@@ -36,7 +36,10 @@ create_clock -period 3.103 -name gtx_txoutclk [get_pins network_inst/gtx_inst/gt
 #   - gtx_txoutclk + MMCM-derived clocks (tx_usrclk 322 MHz, tx_usrclk2 161 MHz)
 # CDC between sys_clk and tx_clk is handled by XPM async FIFOs with internal
 # gray-code synchronizers — no additional CDC constraints needed.
-set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks sys_clk] -group [get_clocks -include_generated_clocks sfp_refclk] -group [get_clocks -include_generated_clocks gtx_txoutclk]
+#changing to -physically_exclusive since XPM FIFO sets max delays which can't be changed
+#set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks sys_clk] -group [get_clocks -include_generated_clocks sfp_refclk] -group [get_clocks -include_generated_clocks gtx_txoutclk]
+set_clock_groups -asynchronous -group [get_clocks sys_clk] -group [get_clocks -include_generated_clocks sfp_refclk] -group [get_clocks -include_generated_clocks gtx_txoutclk]
+
 
 # ------------------------------------------------------------------------------
 # False Paths (async control signals)
@@ -54,18 +57,20 @@ set_false_path -to [get_ports fan_pwm]
 # SFP TX disable (slow control signal)
 set_false_path -to [get_ports sfp_tx_disable]
 
+# Reset synchronizer - allow async reset assertion
+#set_false_path -to [get_pins -hierarchical -filter {NAME =~ *reset_sync_meta*/PRE || NAME =~ *reset_sync_meta*/CLR}]
 
-set_property CLOCK_BUFFER_TYPE BUFG [get_nets sys_clk]
+#set_property CLOCK_BUFFER_TYPE BUFG [get_nets sys_clk]
 #set_property CLOCK_BUFFER_TYPE BUFG [get_nets gtx_txoutclk]
 #set_property CLOCK_DEDICATED_ROUTE BACKBONE [get_nets gtx_txoutclk]
-set_property CLOCK_DEDICATED_ROUTE BACKBONE [get_nets sys_clk]
-set_clock_uncertainty -setup 0.100 [get_clocks sys_clk]
-set_clock_uncertainty -hold -0.150 [get_clocks sys_clk]
+#set_property CLOCK_DEDICATED_ROUTE BACKBONE [get_nets sys_clk]
+#set_clock_uncertainty -setup 0.100 [get_clocks sys_clk]
+#set_clock_uncertainty -hold  0.050 [get_clocks sys_clk]
 #set_clock_uncertainty -setup 0.100 [get_clocks network_inst/gtx_inst/tx_mmcm_clk1]
 #set_clock_uncertainty -hold -0.150 [get_clocks network_inst/gtx_inst/tx_mmcm_clk1]
 #set_clock_uncertainty -setup 0.100 [get_clocks tx_mmcm_clk1]
 # Use pin reference for auto-derived clock (avoids TIMING-28 warning)
-set_clock_uncertainty -hold -0.150 [get_clocks -of_objects [get_pins network_inst/gtx_inst/tx_mmcm_inst/CLKOUT1]]
+#set_clock_uncertainty -hold 0.050 [get_clocks -of_objects [get_pins network_inst/gtx_inst/tx_mmcm_inst/CLKOUT1]]
 #set_max_delay -from [get_clocks -of_objects [get_pins network_inst/gtx_inst/tx_mmcm_inst/CLKOUT1]] -to [get_clocks -of_objects [get_pins network_inst/gtx_inst/tx_mmcm_inst/CLKOUT1]] 0.0
 # ------------------------------------------------------------------------------
 # Physical Constraints
@@ -78,14 +83,14 @@ set_clock_uncertainty -hold -0.150 [get_clocks -of_objects [get_pins network_ins
 
 create_pblock pblock_tx_mmcm_inst
 add_cells_to_pblock [get_pblocks pblock_tx_mmcm_inst] [get_cells -hierarchical *tx_mmcm_inst*]
-add_cells_to_pblock [get_pblocks pblock_tx_mmcm_inst] [get_cells -quiet [list trading_inst/itch_cdc_fifo_inst*]]
-resize_pblock [get_pblocks pblock_tx_mmcm_inst] -add {CLOCKREGION_X0Y3:CLOCKREGION_X0Y3}
+add_cells_to_pblock [get_pblocks pblock_tx_mmcm_inst] [get_cells trading_inst/itch_cdc_fifo_inst]
+resize_pblock [get_pblocks pblock_tx_mmcm_inst] -add {CLOCKREGION_X1Y3:CLOCKREGION_X1Y3}
 
 # Order book + BBO FIFO: wide region with BRAM columns on both sides of clock spine
 # Expanding to X0:X1 reduces clock skew between pipeline FFs and BRAM _bret registers
 # (was split into X1-only arbiter + X0-only storage, causing +0.3ns skew at BRAM edge)
 create_pblock pblock_order_book
-add_cells_to_pblock [get_pblocks pblock_order_book] [get_cells -quiet [list trading_inst/multi_symbol_order_book_inst* trading_inst/bbo_cdc_fifo_inst*]]
+add_cells_to_pblock [get_pblocks pblock_order_book] [get_cells -quiet {trading_inst/multi_symbol_order_book_inst* trading_inst/bbo_cdc_fifo_inst*}]
 resize_pblock [get_pblocks pblock_order_book] -add {CLOCKREGION_X0Y4:CLOCKREGION_X1Y5}
 
 # ------------------------------------------------------------------------------

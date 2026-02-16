@@ -52,7 +52,7 @@ package order_book_pkg is
     -- BBO tracking configuration
     -- CRITICAL: With XOR hash, prices are distributed across ALL addresses.
     -- Must scan ALL levels to find best bid/ask, not just sequential addresses.
-    constant BBO_SCAN_DEPTH     : integer := 64;   -- Scan all 128 levels per side
+    constant BBO_SCAN_DEPTH     : integer := 128;  -- Must scan all 128 levels per side (XOR hash distributes across full range)
 
     -- Data width constants
     constant SYMBOL_WIDTH       : integer := 64;    -- 8 bytes = 64 bits

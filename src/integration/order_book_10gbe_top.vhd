@@ -135,6 +135,9 @@ architecture rtl of order_book_10gbe_top is
     signal last_itch_msg_type   : std_logic_vector(7 downto 0);
     signal last_itch_stock_locate: std_logic_vector(15 downto 0);
     signal last_itch_price      : std_logic_vector(31 downto 0);
+    signal debug_raw_bytes      : std_logic_vector(63 downto 0);
+    signal debug_itch_symbol    : std_logic_vector(63 downto 0);
+    signal debug_mold_input     : std_logic_vector(63 downto 0);
 
     ----------------------------------------------------------------------------
     -- BBO TX Signals
@@ -278,7 +281,8 @@ begin
             debug_refclk_present=> debug_refclk_present,
             debug_rx_cdrlock    => debug_rx_cdrlock,
             debug_rx_elecidle   => debug_rx_elecidle,
-            debug_pcs_block_state => debug_pcs_block_state
+            debug_pcs_block_state => debug_pcs_block_state,
+            debug_mold_input_bytes => debug_mold_input
         );
 
     ----------------------------------------------------------------------------
@@ -321,7 +325,10 @@ begin
             -- Last ITCH message debug
             last_itch_msg_type    => last_itch_msg_type,
             last_itch_stock_locate=> last_itch_stock_locate,
-            last_itch_price       => last_itch_price
+            last_itch_price       => last_itch_price,
+            -- Raw debug bytes
+            debug_raw_bytes       => debug_raw_bytes,
+            debug_itch_symbol     => debug_itch_symbol
         );
 
     ----------------------------------------------------------------------------
@@ -385,60 +392,38 @@ begin
         );
 
     ----------------------------------------------------------------------------
-    -- Debug UART Reporter
+    -- Debug UART Reporter (ITCH-focused, replaces gtx_debug_reporter)
     ----------------------------------------------------------------------------
-    debug_reporter_inst : entity work.gtx_debug_reporter
+    debug_reporter_inst : entity work.itch_debug_uart
         generic map (
             CLK_FREQ  => 200_000_000,
             BAUD_RATE => 115200,
             REPORT_MS => 500
         )
         port map (
-            clk                   => sys_clk,
-            rst                   => sys_rst,
-            -- PHY status
-            qpll_lock             => qpll_lock,
-            qpll_refclk_lost      => '0',
-            tx_resetdone          => gtx_ready,
-            rx_resetdone          => gtx_ready,
-            -- GTX debug
-            debug_por_done        => debug_por_done,
-            debug_qpll_reset      => debug_qpll_reset,
-            debug_gtx_reset       => debug_gtx_reset,
-            debug_tx_userrdy      => debug_tx_userrdy,
-            debug_rx_userrdy      => debug_rx_userrdy,
-            debug_refclk_present  => debug_refclk_present,
-            -- PCS status
-            pcs_block_lock        => pcs_block_lock,
-            rx_header_valid       => '1',
-            rx_datavalid          => '1',
-            block_lock_state      => debug_pcs_block_state,
-            rx_cdrlock            => debug_rx_cdrlock,
-            rx_elecidle           => debug_rx_elecidle,
-            tx_clk_heartbeat      => tx_clk_heartbeat,
-            pcs_reset             => tx_rst,
-            reset_int_dbg         => sys_rst,
-            gtx_ready_dbg         => gtx_ready,
-            -- Network counters
-            start_detect_count    => mac_start_detect,
-            frame_count           => mac_frame_count,
-            udp_packet_count      => mold_packet_count,
-            mold_packet_count     => mold_packet_count,
-            mold_msg_extracted    => mold_msg_extracted,
-            nasdaq_total_messages => mold_msg_extracted,
-            -- ITCH debug
-            itch_msg_type         => last_itch_msg_type,
-            itch_stock_locate     => last_itch_stock_locate,
-            itch_price            => last_itch_price,
-            -- Trading counters
-            itch_fifo_wr_count    => itch_fifo_wr_count,
-            itch_fifo_rd_count    => itch_fifo_rd_count,
-            bbo_update_count      => bbo_update_count,
-            bbo_fifo_wr_count     => bbo_fifo_wr_count,
-            bbo_fifo_rd_count     => bbo_fifo_rd_count,
-            bbo_tx_count          => tx_pkt_count(15 downto 0),  -- Actual BBO UDP TX packet count
+            clk                => sys_clk,
+            rst                => sys_rst,
+            -- Key status
+            qpll_lock          => qpll_lock,
+            block_lock         => pcs_block_lock,
+            -- Parser counters
+            frame_count        => mac_frame_count,
+            mold_msg_count     => mold_msg_extracted,
+            -- ITCH parsed fields
+            itch_msg_type      => last_itch_msg_type,
+            itch_stock_locate  => last_itch_stock_locate,
+            itch_price         => last_itch_price,
+            -- Raw debug bytes
+            debug_raw_bytes    => debug_raw_bytes,
+            debug_itch_symbol  => debug_itch_symbol,
+            debug_mold_input   => debug_mold_input,
+            -- BBO path counters
+            itch_fifo_wr_count => itch_fifo_wr_count,
+            itch_fifo_rd_count => itch_fifo_rd_count,
+            bbo_update_count   => bbo_update_count,
+            bbo_tx_count       => tx_pkt_count(15 downto 0),
             -- UART output
-            uart_tx               => uart_tx
+            uart_tx            => uart_tx
         );
 
 end rtl;

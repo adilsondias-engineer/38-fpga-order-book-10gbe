@@ -1,7 +1,13 @@
 --------------------------------------------------------------------------------
 -- Package: symbol_filter_pkg
--- Description: Symbol filtering package for order book
---              Configurable symbol list for filtering market data messages
+-- Description: Symbol routing package for multi-symbol order book
+--              Maps each symbol to a dedicated order book instance (0-7)
+--
+-- WARNING: Symbol filtering MUST remain enabled. When disabled, all messages
+--          route to order book instance 0 regardless of symbol. This corrupts
+--          the book state with mixed-symbol orders and produces invalid BBO.
+--          The "filter" is actually the routing mechanism for multi-symbol
+--          operation — it is NOT optional.
 --
 -- Adapted from Project 20 for 10GbE integration (Project 38)
 --
@@ -21,8 +27,9 @@ package symbol_filter_pkg is
     constant SYMBOL_WIDTH : integer := 64; -- 8 bytes = 64 bits
     constant MAX_SYMBOLS  : integer := 8;  -- Support up to 8 symbols
 
-    -- Symbol filter list (8 bytes each, space-padded)
-    -- Default list: AAPL, TSLA, SPY, QQQ, GOOGL, MSFT, AMZN, NVDA
+    -- Symbol routing list (8 bytes each, space-padded)
+    -- Each entry maps to a dedicated order book instance by index
+    -- Index 0 = AAPL, Index 1 = TSLA, etc.
     type symbol_array_t is array (0 to MAX_SYMBOLS-1) of std_logic_vector(SYMBOL_WIDTH-1 downto 0);
 
     constant FILTER_SYMBOL_LIST : symbol_array_t := (
@@ -36,32 +43,23 @@ package symbol_filter_pkg is
         7 => x"4E56444120202020"   -- "NVDA    "
     );
 
-    -- Filter enable/disable
-    constant ENABLE_SYMBOL_FILTER : boolean := true;  -- Enable multi-symbol routing to 8 order books
-
-    -- Function to check if symbol matches filter list
+    -- Function to check if symbol matches routing list
     function is_symbol_filtered(symbol : std_logic_vector(SYMBOL_WIDTH-1 downto 0)) return boolean;
 
 end package symbol_filter_pkg;
 
 package body symbol_filter_pkg is
 
-    -- Check if symbol is in the filter list
+    -- Check if symbol is in the routing list
     function is_symbol_filtered(symbol : std_logic_vector(SYMBOL_WIDTH-1 downto 0)) return boolean is
     begin
-        -- If filtering is disabled, pass all symbols
-        if not ENABLE_SYMBOL_FILTER then
-            return true;
-        end if;
-
-        -- Check against each symbol in the filter list
         for i in 0 to MAX_SYMBOLS-1 loop
             if symbol = FILTER_SYMBOL_LIST(i) then
-                return true;  -- Symbol matches filter list
+                return true;
             end if;
         end loop;
 
-        return false;  -- Symbol not in filter list
+        return false;  -- Symbol not in routing list
     end function;
 
 end package body symbol_filter_pkg;

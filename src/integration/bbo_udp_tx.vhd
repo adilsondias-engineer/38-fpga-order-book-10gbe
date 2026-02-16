@@ -138,7 +138,6 @@ architecture rtl of bbo_udp_tx is
     -- TX state machine
     type tx_state_t is (
         TX_IDLE,
-        TX_LATCH_DATA,
         TX_BUILD_FRAME,
         TX_CRC_COMPUTE,
         TX_START,
@@ -212,43 +211,42 @@ begin
                     end if;
                 end if;
 
-                -- Capture pending TX request (normal mode or test mode)
+                -- Capture pending TX request AND latch BBO data immediately
+                -- This prevents race: data must be latched at the same time as
+                -- tx_pending, not later in TX_LATCH_DATA when bbo_symbol may
+                -- have changed from subsequent FIFO reads
                 if bbo_valid = '1' or test_trigger = '1' then
                     tx_pending <= '1';
+                    if TEST_MODE then
+                        lat_symbol <= TEST_SYMBOL;
+                        lat_bid_price <= TEST_BID_PRICE;
+                        lat_bid_shares <= TEST_BID_SHARES;
+                        lat_ask_price <= TEST_ASK_PRICE;
+                        lat_ask_shares <= TEST_ASK_SHARES;
+                        lat_spread <= TEST_SPREAD;
+                        lat_t1 <= x"11111111";
+                        lat_t2 <= x"22222222";
+                        lat_t3 <= x"33333333";
+                    else
+                        lat_symbol <= bbo_symbol;
+                        lat_bid_price <= bbo_bid_price;
+                        lat_bid_shares <= bbo_bid_shares;
+                        lat_ask_price <= bbo_ask_price;
+                        lat_ask_shares <= bbo_ask_shares;
+                        lat_spread <= bbo_spread;
+                        lat_t1 <= ts_t1;
+                        lat_t2 <= ts_t2;
+                        lat_t3 <= ts_t3;
+                    end if;
                 end if;
 
                 case tx_state is
 
                     when TX_IDLE =>
                         if tx_pending = '1' then
-                            tx_state <= TX_LATCH_DATA;
+                            tx_state <= TX_BUILD_FRAME;
                             tx_pending <= '0';
                         end if;
-
-                    when TX_LATCH_DATA =>
-                        -- Latch BBO data and timestamps (use test data in TEST_MODE)
-                        if TEST_MODE then
-                            lat_symbol <= TEST_SYMBOL;
-                            lat_bid_price <= TEST_BID_PRICE;
-                            lat_bid_shares <= TEST_BID_SHARES;
-                            lat_ask_price <= TEST_ASK_PRICE;
-                            lat_ask_shares <= TEST_ASK_SHARES;
-                            lat_spread <= TEST_SPREAD;
-                            lat_t1 <= x"11111111";  -- Recognizable test pattern
-                            lat_t2 <= x"22222222";
-                            lat_t3 <= x"33333333";
-                        else
-                            lat_symbol <= bbo_symbol;
-                            lat_bid_price <= bbo_bid_price;
-                            lat_bid_shares <= bbo_bid_shares;
-                            lat_ask_price <= bbo_ask_price;
-                            lat_ask_shares <= bbo_ask_shares;
-                            lat_spread <= bbo_spread;
-                            lat_t1 <= ts_t1;
-                            lat_t2 <= ts_t2;
-                            lat_t3 <= ts_t3;
-                        end if;
-                        tx_state <= TX_BUILD_FRAME;
 
                     when TX_BUILD_FRAME =>
                         -- Capture T4 timestamp NOW (before CRC computation)
@@ -463,7 +461,7 @@ begin
                     when TX_DATA_11 =>
                         -- Bytes 80-85 (6 bytes) + first 2 CRC bytes
                         -- Frame is 86 bytes, CRC is 4 bytes. 86+4=90 bytes = 11*8+2
-                        -- So we need to start CRC in this cycle to maintain alignment
+                        -- CRC starts in this cycle to maintain alignment
                         xgmii_txd <= crc_final(15 downto 8) & crc_final(7 downto 0) &
                                      frame_data(85) & frame_data(84) &
                                      frame_data(83) & frame_data(82) & frame_data(81) & frame_data(80);

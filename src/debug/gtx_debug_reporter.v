@@ -21,6 +21,9 @@
  *   MT = Last ITCH message type (ASCII: A=Add, E=Exec, X=Cancel, D=Delete, U=Replace)
  *   SL = Last stock locate (16-bit identifier)
  *   PX = Last price (32-bit fixed-point, 4 implied decimals)
+ *   RB = Raw first 8 Bytes from MoldUDP64 output (before ITCH parser)
+ *        Byte 0 should be message type ASCII. If 0xD4/0x31 = UDP header leak
+ *   SY = Last parsed Stock Symbol from ITCH parser (8 ASCII chars as hex)
  *
  * Link Status [OK]/[XK]:
  *   - Based on: QPLL lock, block lock, PCS not in reset
@@ -103,6 +106,10 @@ module gtx_debug_reporter #(
         input  wire [15:0] itch_stock_locate,
         input  wire [31:0] itch_price,
 
+        // Raw debug bytes from ITCH path (tx_clk domain, needs CDC)
+        input  wire [63:0] debug_raw_bytes,    // First 8 bytes of last ITCH msg from MoldUDP64
+        input  wire [63:0] debug_itch_symbol,  // Last parsed symbol from ITCH parser
+
         // BBO path debug counters (optional - tie to 0 if not used)
         input  wire [15:0] itch_fifo_wr_count,
         input  wire [15:0] itch_fifo_rd_count,
@@ -118,12 +125,13 @@ module gtx_debug_reporter #(
     // Report interval in clock cycles
     localparam REPORT_CYCLES = (CLK_FREQ / 1000) * REPORT_MS;
 
-    // Message: "Q:X L:X T:X R:X BL:X CD:X EI:X PR:X ST:X SD:XXXX FC:XXXX UC:XXXX MC:XXXX MX:XXXX NM:XXXX MT:X SL:XXXX PX:XXXXXXXX IW:XXXX IR:XXXX BU:XXXX BW:XXXX BR:XXXX TX:XXXX [OK]\r\n"
+    // Message: "Q:X L:X T:X R:X BL:X CD:X EI:X PR:X ST:X SD:XXXX FC:XXXX UC:XXXX MC:XXXX MX:XXXX NM:XXXX MT:X SL:XXXX PX:XXXXXXXX IW:XXXX IR:XXXX BU:XXXX BW:XXXX BR:XXXX TX:XXXX RB:XXXXXXXXXXXXXXXX SY:XXXXXXXXXXXXXXXX\r\n"
     // PR = PCS reset (should be 0 for FSM to run - if PR:1, FSM is held in reset!)
     // SD = Start Detect count (XGMII Start codes seen on RX)
     // MT/SL/PX = Last parsed ITCH message type, stock locate, price
     // BBO Path: IW=ITCH FIFO Wr, IR=ITCH FIFO Rd, BU=BBO Update, BW=BBO FIFO Wr, BR=BBO FIFO Rd, TX=BBO TX
-    localparam MSG_LEN = 163;  // Includes CR+LF
+    // RB = Raw first 8 bytes before ITCH parser, SY = parsed symbol after ITCH parser
+    localparam MSG_LEN = 203;  // Includes CR+LF (added RB + SY debug fields)
 
     // State machine
     localparam STATE_IDLE     = 2'd0;
@@ -153,6 +161,10 @@ module gtx_debug_reporter #(
     reg [7:0]  itch_type_s, itch_type_ss;
     reg [15:0] itch_sl_s, itch_sl_ss;
     reg [31:0] itch_px_s, itch_px_ss;
+
+    // Raw debug byte sampling
+    reg [63:0] rb_s, rb_ss;   // Raw first 8 bytes from MoldUDP64
+    reg [63:0] sy_s, sy_ss;   // Parsed symbol from ITCH parser
 
     // BBO path counter sampling
     reg [15:0] iw_s, iw_ss;  // ITCH FIFO write count
@@ -220,6 +232,10 @@ module gtx_debug_reporter #(
         itch_sl_s     <= itch_stock_locate;
         itch_px_s     <= itch_price;
 
+        // First stage - raw debug bytes
+        rb_s <= debug_raw_bytes;
+        sy_s <= debug_itch_symbol;
+
         // First stage - BBO path counters
         iw_s <= itch_fifo_wr_count;
         ir_s <= itch_fifo_rd_count;
@@ -256,6 +272,10 @@ module gtx_debug_reporter #(
         itch_type_ss  <= itch_type_s;
         itch_sl_ss    <= itch_sl_s;
         itch_px_ss    <= itch_px_s;
+
+        // Second stage - raw debug bytes
+        rb_ss <= rb_s;
+        sy_ss <= sy_s;
 
         // Second stage - BBO path counters
         iw_ss <= iw_s;
@@ -501,9 +521,53 @@ module gtx_debug_reporter #(
                     msg[159] <= hex_char(tx_ss[7:4]);
                     msg[160] <= hex_char(tx_ss[3:0]);
 
+                    // RB: Raw first 8 Bytes from MoldUDP64 (before ITCH parser)
+                    msg[161] <= " ";
+                    msg[162] <= "R";
+                    msg[163] <= "B";
+                    msg[164] <= ":";
+                    msg[165] <= hex_char(rb_ss[63:60]);
+                    msg[166] <= hex_char(rb_ss[59:56]);
+                    msg[167] <= hex_char(rb_ss[55:52]);
+                    msg[168] <= hex_char(rb_ss[51:48]);
+                    msg[169] <= hex_char(rb_ss[47:44]);
+                    msg[170] <= hex_char(rb_ss[43:40]);
+                    msg[171] <= hex_char(rb_ss[39:36]);
+                    msg[172] <= hex_char(rb_ss[35:32]);
+                    msg[173] <= hex_char(rb_ss[31:28]);
+                    msg[174] <= hex_char(rb_ss[27:24]);
+                    msg[175] <= hex_char(rb_ss[23:20]);
+                    msg[176] <= hex_char(rb_ss[19:16]);
+                    msg[177] <= hex_char(rb_ss[15:12]);
+                    msg[178] <= hex_char(rb_ss[11:8]);
+                    msg[179] <= hex_char(rb_ss[7:4]);
+                    msg[180] <= hex_char(rb_ss[3:0]);
+
+                    // SY: Last parsed Symbol from ITCH parser
+                    msg[181] <= " ";
+                    msg[182] <= "S";
+                    msg[183] <= "Y";
+                    msg[184] <= ":";
+                    msg[185] <= hex_char(sy_ss[63:60]);
+                    msg[186] <= hex_char(sy_ss[59:56]);
+                    msg[187] <= hex_char(sy_ss[55:52]);
+                    msg[188] <= hex_char(sy_ss[51:48]);
+                    msg[189] <= hex_char(sy_ss[47:44]);
+                    msg[190] <= hex_char(sy_ss[43:40]);
+                    msg[191] <= hex_char(sy_ss[39:36]);
+                    msg[192] <= hex_char(sy_ss[35:32]);
+                    msg[193] <= hex_char(sy_ss[31:28]);
+                    msg[194] <= hex_char(sy_ss[27:24]);
+                    msg[195] <= hex_char(sy_ss[23:20]);
+                    msg[196] <= hex_char(sy_ss[19:16]);
+                    msg[197] <= hex_char(sy_ss[15:12]);
+                    msg[198] <= hex_char(sy_ss[11:8]);
+                    msg[199] <= hex_char(sy_ss[7:4]);
+                    msg[200] <= hex_char(sy_ss[3:0]);
+
                     // CR/LF for proper line termination
-                    msg[161] <= 8'h0D;  // CR
-                    msg[162] <= 8'h0A;  // LF
+                    msg[201] <= 8'h0D;  // CR
+                    msg[202] <= 8'h0A;  // LF
 
                     char_idx <= 8'd0;
                     state <= STATE_SEND;

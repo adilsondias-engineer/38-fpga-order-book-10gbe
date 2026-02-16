@@ -83,7 +83,10 @@ entity network_top is
         debug_refclk_present: out std_logic;
         debug_rx_cdrlock    : out std_logic;
         debug_rx_elecidle   : out std_logic;
-        debug_pcs_block_state: out std_logic_vector(2 downto 0)
+        debug_pcs_block_state: out std_logic_vector(2 downto 0);
+
+        -- Raw byte captures for ITCH debug
+        debug_mold_input_bytes : out std_logic_vector(63 downto 0)  -- First 8 bytes entering MoldUDP64
     );
 end network_top;
 
@@ -123,6 +126,7 @@ architecture rtl of network_top is
     -- XGMII interface
     signal xgmii_rxd        : std_logic_vector(63 downto 0);
     signal xgmii_rxc        : std_logic_vector(7 downto 0);
+    signal xgmii_rx_valid   : std_logic;  -- PCS decoder valid (gearbox drops ~1 in 33)
     signal xgmii_txd        : std_logic_vector(63 downto 0);
     signal xgmii_txc        : std_logic_vector(7 downto 0);
 
@@ -132,30 +136,68 @@ architecture rtl of network_top is
     signal link_init_done_int : std_logic;
     signal link_init_active : std_logic;
 
-    -- MAC parser outputs
+    -- MAC parser outputs (IP payload = includes 8-byte UDP header)
     signal ip_payload_valid : std_logic;
     signal ip_payload_data  : std_logic_vector(7 downto 0);
     signal ip_payload_start : std_logic;
     signal ip_payload_end   : std_logic;
     signal ip_protocol      : std_logic_vector(7 downto 0);
 
+    -- UDP header stripper + port filter
+    -- Strips 8-byte UDP header and only forwards packets to ITCH port
+    constant ITCH_UDP_PORT    : std_logic_vector(15 downto 0) := x"3039";  -- Port 12345
+    signal udp_byte_cnt       : unsigned(3 downto 0) := (others => '0');
+    signal udp_parsing        : std_logic := '0';
+    signal udp_forwarding     : std_logic := '0';
+    signal udp_first_byte     : std_logic := '0';
+    signal udp_dst_port_hi    : std_logic_vector(7 downto 0) := (others => '0');
+    signal udp_port_match     : std_logic := '0';
+    signal udp_payload_valid_i: std_logic := '0';
+    signal udp_payload_data_i : std_logic_vector(7 downto 0) := (others => '0');
+    signal udp_payload_start_i: std_logic := '0';
+    signal udp_payload_end_i  : std_logic := '0';
+
     -- PCS status
     signal pcs_block_lock_int : std_logic;
     signal pcs_hi_ber_int   : std_logic;
     signal pcs_block_state_int : std_logic_vector(2 downto 0);
+
+    -- Debug: MoldUDP64 input raw byte capture
+    signal mold_input_capture  : std_logic_vector(63 downto 0) := (others => '0');
+    signal mold_input_byte_cnt : unsigned(3 downto 0) := (others => '0');
+    signal mold_input_active   : std_logic := '0';
     
     
-    attribute MAX_FANOUT : integer;
-    attribute MAX_FANOUT of phy_ready  : signal is 16;
-    attribute MAX_FANOUT of phy_ready_sync  : signal is 16;
-    attribute MAX_FANOUT of phy_ready_tx  : signal is 16;
-    attribute MAX_FANOUT of reset_sync : signal is 16;
-    attribute MAX_FANOUT of sys_rst : signal is 16;
-    attribute MAX_FANOUT of tx_clk_int : signal is 16;
-    attribute MAX_FANOUT of rx_clk_int : signal is 16;
-    attribute MAX_FANOUT of pcs_rst : signal is 16;
-    attribute MAX_FANOUT of tx_resetdone : signal is 16;
-    attribute MAX_FANOUT of rx_resetdone : signal is 16;
+    ----------------------------------------------------------------------------
+    -- Reset Synchronization - TWO RESETS
+    ----------------------------------------------------------------------------
+    
+    -- Reset 1: Async assert, sync deassert (for PHY/PLL/PCS)
+    signal pcs_rst_meta : std_logic := '1';
+    signal pcs_rst_sync : std_logic := '1';
+    
+    -- Reset 2: FULLY SYNCHRONOUS (for MAC parser BRAM control)
+    signal mac_rst_stage1 : std_logic := '1';
+    signal mac_rst_stage2 : std_logic := '1';
+    signal mac_rst        : std_logic := '1';
+    
+    attribute ASYNC_REG : string;
+    attribute ASYNC_REG of pcs_rst_meta   : signal is "TRUE";
+    attribute ASYNC_REG of pcs_rst_sync   : signal is "TRUE";
+    attribute ASYNC_REG of mac_rst_stage1 : signal is "TRUE";
+    attribute ASYNC_REG of mac_rst_stage2 : signal is "TRUE";
+    
+--    attribute MAX_FANOUT : integer;
+--    attribute MAX_FANOUT of phy_ready  : signal is 16;
+--    attribute MAX_FANOUT of phy_ready_sync  : signal is 16;
+--    attribute MAX_FANOUT of phy_ready_tx  : signal is 16;
+--    attribute MAX_FANOUT of reset_sync : signal is 16;
+--    attribute MAX_FANOUT of sys_rst : signal is 16;
+--    attribute MAX_FANOUT of tx_clk_int : signal is 16;
+--    attribute MAX_FANOUT of rx_clk_int : signal is 16;
+--    attribute MAX_FANOUT of pcs_rst : signal is 16;
+--    attribute MAX_FANOUT of tx_resetdone : signal is 16;
+--    attribute MAX_FANOUT of rx_resetdone : signal is 16;
     
     
 begin
@@ -163,16 +205,18 @@ begin
     sys_rst <= not sys_rst_n;
 
     ----------------------------------------------------------------------------
-    -- Reset Synchronization
+    -- PCS Reset (async assert, sync deassert) - for PHY/PCS
     ----------------------------------------------------------------------------
-    process(tx_clk_int, sys_rst_n)
-    begin
-        if sys_rst_n = '0' then
-            reset_sync <= '1';
-        elsif rising_edge(tx_clk_int) then
-            reset_sync <= '0';
-        end if;
-    end process;
+        process(tx_clk_int, sys_rst_n)
+        begin
+            if sys_rst_n = '0' then
+                pcs_rst_meta <= '1';
+                pcs_rst_sync <= '1';
+            elsif rising_edge(tx_clk_int) then
+                pcs_rst_meta <= '0';
+                pcs_rst_sync <= pcs_rst_meta;
+            end if;
+        end process;
 
     -- CDC synchronizer for phy_ready
     process(tx_clk_int)
@@ -183,8 +227,24 @@ begin
         end if;
     end process;
 
-    pcs_rst <= reset_sync or not phy_ready_tx;
+    pcs_rst <= pcs_rst_sync or not phy_ready_tx;
 
+-- MAC Parser Reset (FULLY SYNCHRONOUS) - for BRAM control
+        process(tx_clk_int)
+        begin
+            if rising_edge(tx_clk_int) then
+                mac_rst_stage1 <= sys_rst;
+                mac_rst_stage2 <= mac_rst_stage1;
+                
+                -- Add phy_ready condition
+                if phy_ready_tx = '0' then
+                    mac_rst <= '1';
+                else
+                    mac_rst <= mac_rst_stage2;
+                end if;
+            end if;
+        end process;
+        
     ----------------------------------------------------------------------------
     -- Output Assignments
     ----------------------------------------------------------------------------
@@ -280,7 +340,7 @@ begin
             xgmii_txc       => xgmii_txc,
             xgmii_rxd       => xgmii_rxd,
             xgmii_rxc       => xgmii_rxc,
-            xgmii_rx_valid  => open,
+            xgmii_rx_valid  => xgmii_rx_valid,
             gtx_tx_data     => gtx_tx_data,
             gtx_tx_header   => gtx_tx_header,
             gtx_tx_valid    => open,
@@ -337,9 +397,10 @@ begin
     mac_parser_inst : entity work.mac_parser_xgmii
         port map (
             clk                 => tx_clk_int,
-            rst                 => pcs_rst,
+            rst                 => mac_rst,
             xgmii_rxd           => xgmii_rxd,
             xgmii_rxc           => xgmii_rxc,
+            xgmii_rx_valid      => xgmii_rx_valid,
             ip_payload_valid    => ip_payload_valid,
             ip_payload_data     => ip_payload_data,
             ip_payload_start    => ip_payload_start,
@@ -359,16 +420,147 @@ begin
         );
 
     ----------------------------------------------------------------------------
+    -- UDP Header Stripper + Port Filter
+    -- MAC parser outputs IP payload which INCLUDES the 8-byte UDP header.
+    -- MoldUDP64 handler expects pure UDP payload (without UDP header).
+    -- This process:
+    --   1. Strips the 8-byte UDP header (src_port, dst_port, length, checksum)
+    --   2. Only forwards packets to ITCH port (filters broadcast/mDNS/SSDP)
+    --   3. Only processes UDP protocol (ip_protocol = 0x11)
+    --
+    -- UDP Header (8 bytes):
+    --   Bytes 0-1: Source Port
+    --   Bytes 2-3: Destination Port
+    --   Bytes 4-5: Length
+    --   Bytes 6-7: Checksum
+    ----------------------------------------------------------------------------
+    process(tx_clk_int)
+    begin
+        if rising_edge(tx_clk_int) then
+            if pcs_rst = '1' then
+                udp_byte_cnt <= (others => '0');
+                udp_parsing <= '0';
+                udp_forwarding <= '0';
+                udp_first_byte <= '0';
+                udp_dst_port_hi <= (others => '0');
+                udp_port_match <= '0';
+                udp_payload_valid_i <= '0';
+                udp_payload_data_i <= (others => '0');
+                udp_payload_start_i <= '0';
+                udp_payload_end_i <= '0';
+            else
+                -- Default: pulse signals clear each cycle
+                udp_payload_valid_i <= '0';
+                udp_payload_start_i <= '0';
+                udp_payload_end_i <= '0';
+
+                -- New IP payload arriving (any IP protocol — port filter handles UDP selection)
+                if ip_payload_start = '1' and ip_payload_valid = '1' then
+                    -- Byte 0: UDP src port high byte (skip)
+                    udp_byte_cnt <= to_unsigned(1, 4);
+                    udp_parsing <= '1';
+                    udp_forwarding <= '0';
+                    udp_first_byte <= '0';
+                    udp_port_match <= '0';
+                elsif ip_payload_valid = '1' and udp_parsing = '1' and udp_forwarding = '0' then
+                    -- Still consuming UDP header bytes
+                    if udp_byte_cnt < 15 then
+                        udp_byte_cnt <= udp_byte_cnt + 1;
+                    end if;
+
+                    case to_integer(udp_byte_cnt) is
+                        when 2 =>  -- Byte 2: dst port high byte
+                            udp_dst_port_hi <= ip_payload_data;
+                        when 3 =>  -- Byte 3: dst port low byte — check match
+                            if udp_dst_port_hi = ITCH_UDP_PORT(15 downto 8) and
+                               ip_payload_data = ITCH_UDP_PORT(7 downto 0) then
+                                udp_port_match <= '1';
+                            end if;
+                        when 7 =>  -- Byte 7: checksum low (last header byte)
+                            if udp_port_match = '1' then
+                                udp_forwarding <= '1';
+                                udp_first_byte <= '1';
+                            else
+                                udp_parsing <= '0';  -- Wrong port, ignore rest
+                            end if;
+                        when others => null;
+                    end case;
+                end if;
+
+                -- Forward UDP payload bytes (byte 8+) to MoldUDP64
+                if ip_payload_valid = '1' and udp_forwarding = '1' then
+                    udp_payload_valid_i <= '1';
+                    udp_payload_data_i <= ip_payload_data;
+                    if udp_first_byte = '1' then
+                        udp_payload_start_i <= '1';
+                        udp_first_byte <= '0';
+                    end if;
+                end if;
+
+                -- End of IP payload
+                if ip_payload_end = '1' then
+                    if udp_forwarding = '1' then
+                        udp_payload_end_i <= '1';
+                    end if;
+                    udp_parsing <= '0';
+                    udp_forwarding <= '0';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    ----------------------------------------------------------------------------
+    -- Debug: Capture first 8 bytes entering MoldUDP64 (after UDP header strip)
+    -- Should show MoldUDP64 session ID bytes if UDP strip is correct.
+    -- If shows UDP header bytes instead, the stripper has a bug.
+    ----------------------------------------------------------------------------
+    process(tx_clk_int)
+    begin
+        if rising_edge(tx_clk_int) then
+            if pcs_rst = '1' then
+                mold_input_capture <= (others => '0');
+                mold_input_byte_cnt <= (others => '0');
+                mold_input_active <= '0';
+            else
+                if udp_payload_start_i = '1' and udp_payload_valid_i = '1' then
+                    mold_input_capture(63 downto 56) <= udp_payload_data_i;
+                    mold_input_byte_cnt <= to_unsigned(1, 4);
+                    mold_input_active <= '1';
+                elsif mold_input_active = '1' and udp_payload_valid_i = '1' then
+                    case to_integer(mold_input_byte_cnt) is
+                        when 1 => mold_input_capture(55 downto 48) <= udp_payload_data_i;
+                        when 2 => mold_input_capture(47 downto 40) <= udp_payload_data_i;
+                        when 3 => mold_input_capture(39 downto 32) <= udp_payload_data_i;
+                        when 4 => mold_input_capture(31 downto 24) <= udp_payload_data_i;
+                        when 5 => mold_input_capture(23 downto 16) <= udp_payload_data_i;
+                        when 6 => mold_input_capture(15 downto 8) <= udp_payload_data_i;
+                        when 7 =>
+                            mold_input_capture(7 downto 0) <= udp_payload_data_i;
+                            mold_input_active <= '0';
+                        when others => null;
+                    end case;
+                    mold_input_byte_cnt <= mold_input_byte_cnt + 1;
+                end if;
+                if udp_payload_end_i = '1' then
+                    mold_input_active <= '0';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    debug_mold_input_bytes <= mold_input_capture;
+
+    ----------------------------------------------------------------------------
     -- MoldUDP64 Handler
     ----------------------------------------------------------------------------
     moldudp64_inst : entity work.moldudp64_handler
         port map (
             clk                 => tx_clk_int,
             rst                 => pcs_rst,
-            udp_payload_valid   => ip_payload_valid,
-            udp_payload_data    => ip_payload_data,
-            udp_payload_start   => ip_payload_start,
-            udp_payload_end     => ip_payload_end,
+            udp_payload_valid   => udp_payload_valid_i,
+            udp_payload_data    => udp_payload_data_i,
+            udp_payload_start   => udp_payload_start_i,
+            udp_payload_end     => udp_payload_end_i,
             itch_msg_valid      => mold_itch_valid,
             itch_msg_data       => mold_itch_data,
             itch_msg_start      => mold_itch_start,

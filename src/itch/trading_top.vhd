@@ -71,7 +71,11 @@ entity trading_top is
         -- Last ITCH message fields (for debug, tx_clk domain)
         last_itch_msg_type    : out STD_LOGIC_VECTOR(7 downto 0);
         last_itch_stock_locate: out STD_LOGIC_VECTOR(15 downto 0);
-        last_itch_price       : out STD_LOGIC_VECTOR(31 downto 0)
+        last_itch_price       : out STD_LOGIC_VECTOR(31 downto 0);
+
+        -- Raw debug bytes (tx_clk domain, for UART debug)
+        debug_raw_bytes       : out STD_LOGIC_VECTOR(63 downto 0);
+        debug_itch_symbol     : out STD_LOGIC_VECTOR(63 downto 0)
     );
 end trading_top;
 
@@ -101,6 +105,12 @@ architecture Behavioral of trading_top is
     signal last_msg_type    : STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
     signal last_stock_locate: STD_LOGIC_VECTOR(15 downto 0) := (others => '0');
     signal last_price       : STD_LOGIC_VECTOR(31 downto 0) := (others => '0');
+    signal last_symbol      : STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
+
+    -- Raw byte capture: first 8 bytes of each ITCH message from MoldUDP64
+    signal raw_byte_capture : STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
+    signal raw_byte_cnt     : unsigned(3 downto 0) := (others => '0');
+    signal raw_byte_active  : STD_LOGIC := '0';
 
     ----------------------------------------------------------------------------
     -- ITCH CDC FIFO Signals (tx_clk -> sys_clk)
@@ -290,9 +300,58 @@ begin
                 last_msg_type <= itch_msg_type;
                 last_stock_locate <= itch_stock_locate;
                 last_price <= itch_price;
+                last_symbol <= itch_symbol;
             end if;
         end if;
     end process;
+
+    ----------------------------------------------------------------------------
+    -- Raw Byte Capture (tx_clk domain)
+    -- Captures first 8 bytes of each ITCH message from MoldUDP64 output
+    -- Byte 0 should be message type (0x41='A', 0x45='E', etc.)
+    -- If byte 0 shows UDP header data (e.g. 0xD4), confirms UDP header leak
+    ----------------------------------------------------------------------------
+    process(tx_clk)
+    begin
+        if rising_edge(tx_clk) then
+            if tx_rst = '1' then
+                raw_byte_capture <= (others => '0');
+                raw_byte_cnt <= (others => '0');
+                raw_byte_active <= '0';
+            else
+                -- Start capture on message start
+                if mold_itch_start = '1' and mold_itch_valid = '1' then
+                    -- First byte arrives with start pulse
+                    raw_byte_capture(63 downto 56) <= mold_itch_data;
+                    raw_byte_cnt <= to_unsigned(1, 4);
+                    raw_byte_active <= '1';
+                elsif raw_byte_active = '1' and mold_itch_valid = '1' then
+                    case to_integer(raw_byte_cnt) is
+                        when 1 => raw_byte_capture(55 downto 48) <= mold_itch_data;
+                        when 2 => raw_byte_capture(47 downto 40) <= mold_itch_data;
+                        when 3 => raw_byte_capture(39 downto 32) <= mold_itch_data;
+                        when 4 => raw_byte_capture(31 downto 24) <= mold_itch_data;
+                        when 5 => raw_byte_capture(23 downto 16) <= mold_itch_data;
+                        when 6 => raw_byte_capture(15 downto 8) <= mold_itch_data;
+                        when 7 =>
+                            raw_byte_capture(7 downto 0) <= mold_itch_data;
+                            raw_byte_active <= '0';
+                        when others => null;
+                    end case;
+                    raw_byte_cnt <= raw_byte_cnt + 1;
+                end if;
+
+                -- Stop capture on message end
+                if mold_itch_end = '1' then
+                    raw_byte_active <= '0';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- Debug output assignments
+    debug_raw_bytes   <= raw_byte_capture;
+    debug_itch_symbol <= last_symbol;
 
     ----------------------------------------------------------------------------
     -- ITCH CDC FIFO Writer (tx_clk domain)
@@ -360,12 +419,13 @@ begin
 
     ----------------------------------------------------------------------------
     -- ITCH CDC FIFO (tx_clk -> sys_clk)
-    -- Uses XPM FIFO (xpm_fifo_async) to guarantee BRAM instantiation.
-    -- Vivado inference engine refuses BRAM for this specific data path
-    -- (Bug 8 - exhaustively tested: depth, width, template, entity, clocks)
+    -- Hand-coded TDP BRAM FIFO with registered reads and gray-code CDC.
+    -- Previously used XPM (Bug 8) but XPM introduces -0.072 hold paths.
+    -- async_fifo.vhd has correct TDP template: unconditional registered read.
+    -- If Vivado refuses BRAM inference, revert to async_fifo_itch (XPM).
     ----------------------------------------------------------------------------
-    
-    itch_cdc_fifo_inst : entity work.async_fifo_itch
+
+    itch_cdc_fifo_inst : entity work.async_fifo
         generic map (
             DATA_WIDTH => ITCH_CDC_FIFO_WIDTH,
             FIFO_DEPTH => 256
@@ -482,7 +542,6 @@ begin
             ask_shares      => ob_ask_shares,
             spread          => ob_spread
         );
-
     ----------------------------------------------------------------------------
     -- BBO CDC FIFO Writer (sys_clk domain)
     -- Packs BBO data + T1/T2 timestamps for transfer to tx_clk domain
@@ -535,9 +594,9 @@ begin
 
     ----------------------------------------------------------------------------
     -- BBO CDC FIFO (sys_clk -> tx_clk)
-    -- Uses inference-based async_fifo (BRAM inferred successfully for BBO path)
+    -- Hand-coded TDP BRAM FIFO with registered reads and gray-code CDC.
     ----------------------------------------------------------------------------
-    bbo_cdc_fifo_inst : entity work.async_fifo_itch
+    bbo_cdc_fifo_inst : entity work.async_fifo
         generic map (
             DATA_WIDTH => BBO_CDC_FIFO_WIDTH,
             FIFO_DEPTH => 256
